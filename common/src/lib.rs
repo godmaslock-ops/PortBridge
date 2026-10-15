@@ -106,3 +106,33 @@ pub async fn read_frame<R: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(r: &
     r.read_exact(&mut buf).await?;
     Ok(serde_json::from_slice(&buf)?)
 }
+
+
+pub fn validate_usb_request(request: &UsbRequest) -> Result<()> {
+    if request.timeout_ms == 0 || request.timeout_ms > 120_000 {
+        return Err(anyhow!("invalid USB timeout: {}", request.timeout_ms));
+    }
+    if request.data.len() > MAX_FRAME {
+        return Err(anyhow!("USB payload too large: {}", request.data.len()));
+    }
+    if request.expected_length as usize > MAX_FRAME {
+        return Err(anyhow!("USB expected_length too large: {}", request.expected_length));
+    }
+    if matches!(request.transfer, UsbTransferType::Control) {
+        let setup = request.setup.ok_or_else(|| anyhow!("control transfer requires setup packet"))?;
+        let setup_len = u16::from_le_bytes([setup[6], setup[7]]) as usize;
+        match request.direction {
+            UsbDirection::In => {
+                if request.expected_length as usize > setup_len && request.expected_length != 0 {
+                    return Err(anyhow!("control IN expected_length exceeds wLength"));
+                }
+            }
+            UsbDirection::Out => {
+                if request.data.len() > setup_len {
+                    return Err(anyhow!("control OUT payload exceeds wLength"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
