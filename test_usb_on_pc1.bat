@@ -17,6 +17,9 @@ if not exist portbridge-server.exe (
   echo === Low-level RAW USB probe ===
   portbridge-server.exe --probe-raw-usb
   echo.
+  echo === Safe interface claim probe ===
+  portbridge-server.exe --probe-claim
+  echo.
   echo === ADB transport probe ===
   portbridge-server.exe --probe-adb
 ) > usb_test_log.txt 2>&1
