@@ -380,12 +380,7 @@ fn parse_control_setup(setup: [u8;8]) -> Result<(ControlType, Recipient, u8, u16
 }
 
 fn perform_real_usb_request(interface: &nusb::Interface, request: &UsbRequest) -> Result<UsbCompletion> {
-    if request.timeout_ms == 0 || request.timeout_ms > 120_000 {
-        return Err(anyhow!("invalid USB timeout {}", request.timeout_ms));
-    }
-    if request.data.len() > MAX_FRAME || request.expected_length as usize > MAX_FRAME {
-        return Err(anyhow!("USB transfer exceeds frame limit"));
-    }
+    validate_usb_request(request)?;
 
     let io_timeout = std::time::Duration::from_millis(request.timeout_ms as u64);
     match request.transfer {
