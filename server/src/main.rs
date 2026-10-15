@@ -223,6 +223,60 @@ fn probe_raw_usb() -> Result<()> {
 }
 
 
+
+fn probe_claim_interfaces() -> Result<()> {
+    println!("[CLAIM] Safe interface-claim test. No USB transfers will be sent.");
+    let devices = nusb::list_devices().wait().context("nusb list_devices")?;
+    let mut candidates = 0usize;
+
+    for dev in devices {
+        let raw_interfaces: Vec<(u8,u8,u8,u8)> = dev.interfaces()
+            .map(|i| (i.interface_number(), i.class(), i.subclass(), i.protocol()))
+            .collect();
+        let mode = classify_usb_mode_enum(dev.vendor_id(), dev.product_string(), &raw_interfaces);
+
+        for (num, class, subclass, protocol) in raw_interfaces.iter().copied() {
+            let android_vendor_interface =
+                class == 0xff && subclass == 0x42 && (protocol == 0x01 || protocol == 0x03);
+            let xiaomi_vendor_interface = dev.vendor_id() == 0x2717 && class == 0xff;
+
+            if !android_vendor_interface && !xiaomi_vendor_interface {
+                continue;
+            }
+
+            candidates += 1;
+            println!(
+                "[CLAIM] {:04x}:{:04x} mode={} if={} class={:02x}/{:02x}/{:02x} product={}",
+                dev.vendor_id(),
+                dev.product_id(),
+                mode_name(&mode),
+                num,
+                class,
+                subclass,
+                protocol,
+                dev.product_string().unwrap_or("")
+            );
+
+            match dev.open().wait() {
+                Ok(device) => match device.claim_interface(num).wait() {
+                    Ok(interface) => {
+                        println!("  claim-test: OK (interface released immediately)");
+                        drop(interface);
+                    }
+                    Err(e) => println!("  claim-test: FAILED ({e})"),
+                },
+                Err(e) => println!("  device-open: FAILED ({e})"),
+            }
+        }
+    }
+
+    if candidates == 0 {
+        println!("[CLAIM] No Android/Fastboot/Xiaomi vendor interfaces found.");
+    }
+    println!("[CLAIM] Finished. No control, bulk, interrupt, or isochronous transfers were submitted.");
+    Ok(())
+}
+
 fn snapshot_usb_keys() -> Result<Vec<String>> {
     let mut keys: Vec<String> = list_usb_low_level()?
         .into_iter()
@@ -364,6 +418,11 @@ async fn main() -> Result<()> {
 
     if args.iter().any(|a|a=="--watch-usb") {
         watch_usb_changes().await?;
+        return Ok(());
+    }
+
+    if args.iter().any(|a|a=="--probe-claim") {
+        probe_claim_interfaces()?;
         return Ok(());
     }
 
