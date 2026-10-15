@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 chcp 65001 >nul
-echo === PortBridge PC1 USB + ADB diagnostic ===
+echo === PortBridge PC1 USB diagnostic v0.11 ===
 echo Date: %date% %time%
 if not exist portbridge-server.exe (
   echo [ERROR] portbridge-server.exe not found next to this BAT file.
@@ -11,8 +11,11 @@ if not exist portbridge-server.exe (
   exit /b 2
 )
 (
-  echo === USB PnP enumeration ===
+  echo === Windows PnP enumeration ===
   portbridge-server.exe --list-usb
+  echo.
+  echo === Low-level RAW USB probe ===
+  portbridge-server.exe --probe-raw-usb
   echo.
   echo === ADB transport probe ===
   portbridge-server.exe --probe-adb
