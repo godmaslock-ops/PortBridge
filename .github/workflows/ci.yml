@@ -28,6 +28,7 @@ jobs:
           Copy-Item target\release\portbridge-server.exe dist\
           Copy-Item target\release\portbridge-client.exe dist\
           Copy-Item test_usb_on_pc1.bat dist\
+          Copy-Item watch_usb_modes_on_pc1.bat dist\
           Copy-Item run_mock_server.bat dist\
           Copy-Item run_mock_selftest.bat dist\
       - uses: actions/upload-artifact@v4
