@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use nusb::MaybeFuture;
 use portbridge_common::*;
 use std::{env, path::{Path, PathBuf}, process::Command, sync::Arc};
 use tokio::{net::{TcpListener, TcpStream}, sync::Semaphore, time::{timeout, Duration}};
@@ -109,6 +110,72 @@ fn probe_adb() -> Result<()> {
     Ok(())
 }
 
+fn classify_usb_mode(vid: u16, product: Option<&str>, interfaces: &[(u8,u8,u8,u8)]) -> &'static str {
+    let p = product.unwrap_or("").to_ascii_lowercase();
+
+    if interfaces.iter().any(|(_, class, subclass, protocol)| *class == 0xff && *subclass == 0x42 && *protocol == 0x03)
+        || p.contains("fastboot") {
+        return "FASTBOOT";
+    }
+
+    let adb_like = interfaces.iter().any(|(_, class, subclass, protocol)| *class == 0xff && *subclass == 0x42 && *protocol == 0x01);
+    if vid == 0x2717 && adb_like {
+        return "XIAOMI_ADB_OR_MI_ASSISTANT_CANDIDATE";
+    }
+    if adb_like || p.contains("adb") {
+        return "ADB_LIKE";
+    }
+    if vid == 0x2717 && (p.contains("recovery") || p.contains("assistant")) {
+        return "XIAOMI_RECOVERY_OR_MI_ASSISTANT_CANDIDATE";
+    }
+    if vid == 0x2717 {
+        return "XIAOMI_USB";
+    }
+    "OTHER_USB"
+}
+
+fn probe_raw_usb() -> Result<()> {
+    println!("[RAW-USB] Enumerating devices through nusb...");
+    let devices = nusb::list_devices().wait().context("nusb list_devices")?;
+    let mut count = 0usize;
+
+    for dev in devices {
+        count += 1;
+        let interfaces: Vec<(u8,u8,u8,u8)> = dev.interfaces()
+            .map(|i| (i.interface_number(), i.class(), i.subclass(), i.protocol()))
+            .collect();
+
+        let mode = classify_usb_mode(dev.vendor_id(), dev.product_string(), &interfaces);
+        println!(
+            "[RAW-USB] {:04x}:{:04x} | mode={} | product={} | serial={}",
+            dev.vendor_id(),
+            dev.product_id(),
+            mode,
+            dev.product_string().unwrap_or(""),
+            dev.serial_number().unwrap_or("")
+        );
+
+        if interfaces.is_empty() {
+            println!("  interfaces: unavailable from OS cache");
+        } else {
+            for (num, class, subclass, protocol) in &interfaces {
+                println!("  interface {} class={:02x} subclass={:02x} protocol={:02x}", num, class, subclass, protocol);
+            }
+        }
+
+        match dev.open().wait() {
+            Ok(_) => println!("  open-test: OK"),
+            Err(e) => println!("  open-test: FAILED ({e})"),
+        }
+    }
+
+    if count == 0 {
+        println!("[RAW-USB] No USB devices returned by nusb.");
+    }
+    println!("[RAW-USB] Note: open-test does not send data and does not claim interfaces.");
+    Ok(())
+}
+
 async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
     s.set_nodelay(true)?;
     let hello: ControlMessage = timeout(Duration::from_secs(30), read_frame(&mut s)).await??;
@@ -137,7 +204,7 @@ async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
                     opened=Some(device_id.clone());
                     write_frame(&mut s,&ControlMessage::UsbOpened{device_id}).await?;
                 } else {
-                    write_frame(&mut s,&ControlMessage::Error{message:"real USB open backend is not enabled yet; use --probe-adb for the current Windows validation stage".into()}).await?;
+                    write_frame(&mut s,&ControlMessage::Error{message:"real USB transfer backend is not enabled yet; use --probe-raw-usb to validate low-level Windows access".into()}).await?;
                 }
             }
             ControlMessage::UsbRequest{request} => {
@@ -202,10 +269,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if args.iter().any(|a|a=="--probe-raw-usb") {
+        probe_raw_usb()?;
+        return Ok(());
+    }
+
     let mock=args.iter().any(|a|a=="--mock-usb");
     let addr=args.iter().find(|a|a.contains(':') && !a.starts_with("--")).cloned().unwrap_or_else(||"0.0.0.0:47990".into());
     let listener=TcpListener::bind(&addr).await?;
-    println!("PortBridge server v0.10 listening on {addr} mock_usb={mock}");
+    println!("PortBridge server v0.11 listening on {addr} mock_usb={mock}");
     let sem=Arc::new(Semaphore::new(128));
     loop {
         let (s,p)=listener.accept().await?;
