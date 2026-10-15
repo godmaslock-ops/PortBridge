@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
-use nusb::MaybeFuture;
+use nusb::{MaybeFuture, transfer::{Bulk, In, Out, ControlIn, ControlOut, ControlType, Recipient}};
 use portbridge_common::*;
-use std::{env, path::{Path, PathBuf}, process::Command, sync::Arc};
+use std::{env, io::{Read, Write}, path::{Path, PathBuf}, process::Command, sync::Arc};
 use tokio::{net::{TcpListener, TcpStream}, sync::Semaphore, time::{timeout, Duration}};
 use uuid::Uuid;
 
@@ -355,6 +355,97 @@ fn open_and_claim_by_id(device_id: &str) -> Result<nusb::Interface> {
     Err(anyhow!("USB device not found: {device_id}"))
 }
 
+
+fn parse_control_setup(setup: [u8;8]) -> Result<(ControlType, Recipient, u8, u16, u16, u16, bool)> {
+    let bm = setup[0];
+    let control_type = match (bm >> 5) & 0x03 {
+        0 => ControlType::Standard,
+        1 => ControlType::Class,
+        2 => ControlType::Vendor,
+        _ => return Err(anyhow!("reserved USB control request type")),
+    };
+    let recipient = match bm & 0x1f {
+        0 => Recipient::Device,
+        1 => Recipient::Interface,
+        2 => Recipient::Endpoint,
+        3 => Recipient::Other,
+        x => return Err(anyhow!("unsupported USB control recipient {x}")),
+    };
+    let request = setup[1];
+    let value = u16::from_le_bytes([setup[2], setup[3]]);
+    let index = u16::from_le_bytes([setup[4], setup[5]]);
+    let length = u16::from_le_bytes([setup[6], setup[7]]);
+    let is_in = (bm & 0x80) != 0;
+    Ok((control_type, recipient, request, value, index, length, is_in))
+}
+
+fn perform_real_usb_request(interface: &nusb::Interface, request: &UsbRequest) -> Result<UsbCompletion> {
+    if request.timeout_ms == 0 || request.timeout_ms > 120_000 {
+        return Err(anyhow!("invalid USB timeout {}", request.timeout_ms));
+    }
+    if request.data.len() > MAX_FRAME || request.expected_length as usize > MAX_FRAME {
+        return Err(anyhow!("USB transfer exceeds frame limit"));
+    }
+
+    let io_timeout = std::time::Duration::from_millis(request.timeout_ms as u64);
+    match request.transfer {
+        UsbTransferType::Control => {
+            let setup = request.setup.ok_or_else(|| anyhow!("control transfer missing setup packet"))?;
+            let (control_type, recipient, usb_request, value, index, setup_length, is_in) = parse_control_setup(setup)?;
+            if is_in != matches!(request.direction, UsbDirection::In) {
+                return Err(anyhow!("control direction mismatch"));
+            }
+            if is_in {
+                let length = if request.expected_length == 0 { setup_length } else { request.expected_length.min(setup_length as u32) as u16 };
+                let data = interface.control_in(ControlIn {
+                    control_type,
+                    recipient,
+                    request: usb_request,
+                    value,
+                    index,
+                    length,
+                }, io_timeout).wait().context("USB control IN")?;
+                Ok(UsbCompletion { request_id: request.request_id, status: UsbStatus::Ok, transferred: data.len() as u32, data })
+            } else {
+                if request.data.len() > setup_length as usize {
+                    return Err(anyhow!("control OUT payload exceeds wLength"));
+                }
+                interface.control_out(ControlOut {
+                    control_type,
+                    recipient,
+                    request: usb_request,
+                    value,
+                    index,
+                    data: &request.data,
+                }, io_timeout).wait().context("USB control OUT")?;
+                Ok(UsbCompletion { request_id: request.request_id, status: UsbStatus::Ok, transferred: request.data.len() as u32, data: vec![] })
+            }
+        }
+        UsbTransferType::Bulk => {
+            if matches!(request.direction, UsbDirection::In) {
+                let size = request.expected_length.max(1) as usize;
+                let mut reader = interface.endpoint::<Bulk, In>(request.endpoint)
+                    .context("open bulk IN endpoint")?
+                    .reader(size.max(4096))
+                    .with_read_timeout(io_timeout);
+                let mut data = vec![0u8; size];
+                let n = reader.read(&mut data).context("bulk IN read")?;
+                data.truncate(n);
+                Ok(UsbCompletion { request_id: request.request_id, status: UsbStatus::Ok, transferred: n as u32, data })
+            } else {
+                let mut writer = interface.endpoint::<Bulk, Out>(request.endpoint)
+                    .context("open bulk OUT endpoint")?
+                    .writer(request.data.len().max(4096));
+                writer.write_all(&request.data).context("bulk OUT write")?;
+                writer.flush().context("bulk OUT flush")?;
+                Ok(UsbCompletion { request_id: request.request_id, status: UsbStatus::Ok, transferred: request.data.len() as u32, data: vec![] })
+            }
+        }
+        UsbTransferType::Interrupt => Err(anyhow!("interrupt forwarding not implemented yet")),
+        UsbTransferType::Isochronous => Err(anyhow!("isochronous forwarding not implemented")),
+    }
+}
+
 async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
     s.set_nodelay(true)?;
     let hello: ControlMessage = timeout(Duration::from_secs(30), read_frame(&mut s)).await??;
@@ -398,10 +489,17 @@ async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
             }
             ControlMessage::UsbRequest{request} => {
                 if !mock {
-                    if real_interface.is_none() {
+                    let Some(interface) = real_interface.as_ref() else {
                         write_frame(&mut s,&ControlMessage::Error{message:"no real USB interface opened".into()}).await?;
-                    } else {
-                        write_frame(&mut s,&ControlMessage::Error{message:"real interface is open and claimed; transfer forwarding is the next implementation stage".into()}).await?;
+                        continue;
+                    };
+                    match perform_real_usb_request(interface, &request) {
+                        Ok(completion) => write_frame(&mut s,&ControlMessage::UsbCompletion{completion}).await?,
+                        Err(e) => {
+                            eprintln!("USB request {} failed: {e:#}", request.request_id);
+                            let completion=UsbCompletion{request_id:request.request_id,status:UsbStatus::Error,transferred:0,data:vec![]};
+                            write_frame(&mut s,&ControlMessage::UsbCompletion{completion}).await?;
+                        }
                     }
                     continue;
                 }
@@ -480,7 +578,7 @@ async fn main() -> Result<()> {
     let mock=args.iter().any(|a|a=="--mock-usb");
     let addr=args.iter().find(|a|a.contains(':') && !a.starts_with("--")).cloned().unwrap_or_else(||"0.0.0.0:47990".into());
     let listener=TcpListener::bind(&addr).await?;
-    println!("PortBridge server v0.11 listening on {addr} mock_usb={mock}");
+    println!("PortBridge server v0.13 listening on {addr} mock_usb={mock}");
     let sem=Arc::new(Semaphore::new(128));
     loop {
         let (s,p)=listener.accept().await?;
