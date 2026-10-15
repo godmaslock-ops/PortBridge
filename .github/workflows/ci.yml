@@ -1,0 +1,36 @@
+name: PortBridge CI
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --workspace
+      - run: cargo test --workspace
+
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --workspace
+      - shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\release\portbridge-server.exe dist\
+          Copy-Item target\release\portbridge-client.exe dist\
+          Copy-Item test_usb_on_pc1.bat dist\
+          Copy-Item run_mock_server.bat dist\
+          Copy-Item run_mock_selftest.bat dist\
+      - uses: actions/upload-artifact@v4
+        with:
+          name: portbridge-windows-x64-v0.9
+          path: dist/*
