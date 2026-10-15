@@ -318,6 +318,43 @@ async fn watch_usb_changes() -> Result<()> {
     }
 }
 
+
+fn open_and_claim_by_id(device_id: &str) -> Result<nusb::Interface> {
+    let devices = nusb::list_devices().wait().context("nusb list_devices")?;
+    for dev in devices {
+        let id = format!("nusb:{:?}", dev.id());
+        if id != device_id {
+            continue;
+        }
+
+        let raw_interfaces: Vec<(u8,u8,u8,u8)> = dev.interfaces()
+            .map(|i| (i.interface_number(), i.class(), i.subclass(), i.protocol()))
+            .collect();
+        let mode = classify_usb_mode_enum(dev.vendor_id(), dev.product_string(), &raw_interfaces);
+
+        let preferred = raw_interfaces.iter()
+            .find(|(_,class,subclass,protocol)| {
+                *class == 0xff && *subclass == 0x42 && (*protocol == 0x01 || *protocol == 0x03)
+            })
+            .or_else(|| {
+                if dev.vendor_id() == 0x2717 {
+                    raw_interfaces.iter().find(|(_,class,_,_)| *class == 0xff)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| raw_interfaces.first())
+            .ok_or_else(|| anyhow!("device has no claimable USB interfaces"))?;
+
+        let interface_number = preferred.0;
+        let device = dev.open().wait().context("open USB device")?;
+        let interface = device.claim_interface(interface_number).wait()
+            .with_context(|| format!("claim interface {} for mode {}", interface_number, mode_name(&mode)))?;
+        return Ok(interface);
+    }
+    Err(anyhow!("USB device not found: {device_id}"))
+}
+
 async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
     s.set_nodelay(true)?;
     let hello: ControlMessage = timeout(Duration::from_secs(30), read_frame(&mut s)).await??;
@@ -332,6 +369,7 @@ async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
     let sid = Uuid::new_v4().to_string();
     write_frame(&mut s, &ControlMessage::Welcome{version:PROTOCOL_VERSION,session_id:sid}).await?;
     let mut opened: Option<String> = None;
+    let mut real_interface: Option<nusb::Interface> = None;
     loop {
         let msg: ControlMessage = read_frame(&mut s).await?;
         match msg {
@@ -346,12 +384,25 @@ async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
                     opened=Some(device_id.clone());
                     write_frame(&mut s,&ControlMessage::UsbOpened{device_id}).await?;
                 } else {
-                    write_frame(&mut s,&ControlMessage::Error{message:"real USB transfer backend is not enabled yet; use --probe-raw-usb to validate low-level Windows access".into()}).await?;
+                    match open_and_claim_by_id(&device_id) {
+                        Ok(interface) => {
+                            real_interface = Some(interface);
+                            opened = Some(device_id.clone());
+                            write_frame(&mut s,&ControlMessage::UsbOpened{device_id}).await?;
+                        }
+                        Err(e) => {
+                            write_frame(&mut s,&ControlMessage::Error{message:format!("USB open/claim failed: {e:#}")}).await?;
+                        }
+                    }
                 }
             }
             ControlMessage::UsbRequest{request} => {
                 if !mock {
-                    write_frame(&mut s,&ControlMessage::Error{message:"real USB transfer backend is not enabled yet".into()}).await?;
+                    if real_interface.is_none() {
+                        write_frame(&mut s,&ControlMessage::Error{message:"no real USB interface opened".into()}).await?;
+                    } else {
+                        write_frame(&mut s,&ControlMessage::Error{message:"real interface is open and claimed; transfer forwarding is the next implementation stage".into()}).await?;
+                    }
                     continue;
                 }
                 if opened.is_none() {
