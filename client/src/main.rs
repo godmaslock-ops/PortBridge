@@ -23,10 +23,43 @@ async fn selftest(addr:&str)->Result<()> {
     Ok(())
 }
 
+
+async fn list_remote_usb(addr:&str)->Result<()> {
+    let mut s=TcpStream::connect(addr).await?;
+    s.set_nodelay(true)?;
+    write_frame(&mut s,&ControlMessage::Hello{version:PROTOCOL_VERSION,client:"portbridge-list".into()}).await?;
+    match recv(&mut s).await? {
+        ControlMessage::Welcome{..} => {},
+        x => return Err(anyhow!("bad welcome: {x:?}")),
+    }
+    write_frame(&mut s,&ControlMessage::ListDevices).await?;
+    let devices=match recv(&mut s).await? {
+        ControlMessage::DeviceList{devices} => devices,
+        x => return Err(anyhow!("bad device list: {x:?}")),
+    };
+    for d in devices {
+        println!(
+            "{} {:04x}:{:04x} mode={:?} product={} serial={}",
+            d.id,
+            d.vid.unwrap_or(0),
+            d.pid.unwrap_or(0),
+            d.mode,
+            d.product.unwrap_or_default(),
+            d.serial.unwrap_or_default()
+        );
+        for i in d.interfaces {
+            println!("  if={} class={:02x} subclass={:02x} protocol={:02x}", i.number, i.class, i.subclass, i.protocol);
+        }
+    }
+    write_frame(&mut s,&ControlMessage::Close).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main()->Result<()> {
     let args:Vec<String>=env::args().collect();
     if let Some(i)=args.iter().position(|a|a=="--usb-selftest") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return selftest(addr).await; }
-    eprintln!("Usage: portbridge-client --usb-selftest SERVER_IP:47990");
+    if let Some(i)=args.iter().position(|a|a=="--list-remote-usb") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return list_remote_usb(addr).await; }
+    eprintln!("Usage: portbridge-client --usb-selftest SERVER_IP:47990 | --list-remote-usb SERVER_IP:47990");
     Ok(())
 }
