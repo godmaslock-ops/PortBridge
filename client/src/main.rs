@@ -55,11 +55,80 @@ async fn list_remote_usb(addr:&str)->Result<()> {
     Ok(())
 }
 
+
+
+async fn remote_control_smoke(addr:&str)->Result<()> {
+    let mut s=TcpStream::connect(addr).await?;
+    s.set_nodelay(true)?;
+    write_frame(&mut s,&ControlMessage::Hello{version:PROTOCOL_VERSION,client:"portbridge-remote-smoke".into()}).await?;
+    match recv(&mut s).await? {
+        ControlMessage::Welcome{..} => {},
+        x => return Err(anyhow!("bad welcome: {x:?}")),
+    }
+
+    write_frame(&mut s,&ControlMessage::ListDevices).await?;
+    let devices=match recv(&mut s).await? {
+        ControlMessage::DeviceList{devices} => devices,
+        x => return Err(anyhow!("bad device list: {x:?}")),
+    };
+
+    let d=devices.into_iter()
+        .find(|d| matches!(d.mode, Some(UsbDeviceMode::AdbLike) | Some(UsbDeviceMode::XiaomiCandidate) | Some(UsbDeviceMode::Fastboot)))
+        .ok_or_else(|| anyhow!("no Android/Xiaomi/Fastboot USB device found on remote PC"))?;
+
+    println!(
+        "[SMOKE] selected {} {:04x}:{:04x} mode={:?} product={}",
+        d.id,
+        d.vid.unwrap_or(0),
+        d.pid.unwrap_or(0),
+        d.mode,
+        d.product.clone().unwrap_or_default()
+    );
+
+    write_frame(&mut s,&ControlMessage::OpenUsb{device_id:d.id.clone()}).await?;
+    match recv(&mut s).await? {
+        ControlMessage::UsbOpened{..} => println!("[SMOKE] remote open/claim: OK"),
+        ControlMessage::Error{message} => return Err(anyhow!("remote open/claim failed: {message}")),
+        x => return Err(anyhow!("unexpected open response: {x:?}")),
+    }
+
+    let req=UsbRequest{
+        request_id:1001,
+        endpoint:0,
+        transfer:UsbTransferType::Control,
+        direction:UsbDirection::In,
+        timeout_ms:3000,
+        setup:Some([0x80,0x06,0x00,0x01,0x00,0x00,18,0]),
+        data:vec![],
+        expected_length:18,
+    };
+    validate_usb_request(&req)?;
+    write_frame(&mut s,&ControlMessage::UsbRequest{request:req}).await?;
+    match recv(&mut s).await? {
+        ControlMessage::UsbCompletion{completion} if matches!(completion.status,UsbStatus::Ok) => {
+            println!("[SMOKE] control GET_DESCRIPTOR: OK transferred={}", completion.transferred);
+            if completion.data.len() >= 12 {
+                let vid=u16::from_le_bytes([completion.data[8],completion.data[9]]);
+                let pid=u16::from_le_bytes([completion.data[10],completion.data[11]]);
+                println!("[SMOKE] descriptor VID:PID={:04x}:{:04x}",vid,pid);
+            }
+        }
+        ControlMessage::UsbCompletion{completion} => return Err(anyhow!("control request failed with status {:?}",completion.status)),
+        ControlMessage::Error{message} => return Err(anyhow!("server error: {message}")),
+        x => return Err(anyhow!("unexpected control response: {x:?}")),
+    }
+
+    write_frame(&mut s,&ControlMessage::Close).await?;
+    println!("[SMOKE] remote control path PASSED");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main()->Result<()> {
     let args:Vec<String>=env::args().collect();
     if let Some(i)=args.iter().position(|a|a=="--usb-selftest") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return selftest(addr).await; }
     if let Some(i)=args.iter().position(|a|a=="--list-remote-usb") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return list_remote_usb(addr).await; }
-    eprintln!("Usage: portbridge-client --usb-selftest SERVER_IP:47990 | --list-remote-usb SERVER_IP:47990");
+    if let Some(i)=args.iter().position(|a|a=="--remote-control-smoke") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return remote_control_smoke(addr).await; }
+    eprintln!("Usage: portbridge-client --usb-selftest SERVER_IP:47990 | --list-remote-usb SERVER_IP:47990 | --remote-control-smoke SERVER_IP:47990");
     Ok(())
 }
