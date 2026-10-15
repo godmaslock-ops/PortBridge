@@ -2,8 +2,27 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 11;
 pub const MAX_FRAME: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsbDeviceMode {
+    Unknown,
+    AdbLike,
+    Fastboot,
+    XiaomiCandidate,
+    Other,
+    Mock,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsbInterfaceDescriptor {
+    pub number: u8,
+    pub class: u8,
+    pub subclass: u8,
+    pub protocol: u8,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceDescriptor {
@@ -14,6 +33,10 @@ pub struct DeviceDescriptor {
     pub product: Option<String>,
     pub serial: Option<String>,
     pub instance_id: Option<String>,
+    #[serde(default)]
+    pub mode: Option<UsbDeviceMode>,
+    #[serde(default)]
+    pub interfaces: Vec<UsbInterfaceDescriptor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
