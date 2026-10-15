@@ -222,6 +222,48 @@ fn probe_raw_usb() -> Result<()> {
     Ok(())
 }
 
+
+fn snapshot_usb_keys() -> Result<Vec<String>> {
+    let mut keys: Vec<String> = list_usb_low_level()?
+        .into_iter()
+        .map(|d| format!("{:04x}:{:04x}|{:?}|{}|{}",
+            d.vid.unwrap_or(0),
+            d.pid.unwrap_or(0),
+            d.mode.unwrap_or(UsbDeviceMode::Unknown),
+            d.product.unwrap_or_default(),
+            d.serial.unwrap_or_default()))
+        .collect();
+    keys.sort();
+    Ok(keys)
+}
+
+async fn watch_usb_changes() -> Result<()> {
+    println!("[WATCH] Monitoring USB re-enumeration. Press Ctrl+C to stop.");
+    let mut last = snapshot_usb_keys().unwrap_or_default();
+    for x in &last {
+        println!("[WATCH] present: {x}");
+    }
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let now = match snapshot_usb_keys() {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[WATCH] snapshot failed: {e:#}");
+                continue;
+            }
+        };
+
+        for old in last.iter().filter(|x| !now.contains(x)) {
+            println!("[WATCH] removed: {old}");
+        }
+        for new in now.iter().filter(|x| !last.contains(x)) {
+            println!("[WATCH] added:   {new}");
+        }
+        last = now;
+    }
+}
+
 async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
     s.set_nodelay(true)?;
     let hello: ControlMessage = timeout(Duration::from_secs(30), read_frame(&mut s)).await??;
@@ -317,6 +359,11 @@ async fn main() -> Result<()> {
 
     if args.iter().any(|a|a=="--probe-raw-usb") {
         probe_raw_usb()?;
+        return Ok(());
+    }
+
+    if args.iter().any(|a|a=="--watch-usb") {
+        watch_usb_changes().await?;
         return Ok(());
     }
 
