@@ -6,7 +6,17 @@ use tokio::{net::{TcpListener, TcpStream}, sync::Semaphore, time::{timeout, Dura
 use uuid::Uuid;
 
 fn mock_device() -> DeviceDescriptor {
-    DeviceDescriptor { id:"mock:portbridge-usb".into(), vid:Some(0x1209), pid:Some(0x5042), manufacturer:Some("PortBridge".into()), product:Some("Mock USB Device".into()), serial:Some("PB-MOCK-0001".into()), instance_id:Some("MOCK\\PORTBRIDGE".into()) }
+    DeviceDescriptor {
+        id:"mock:portbridge-usb".into(),
+        vid:Some(0x1209),
+        pid:Some(0x5042),
+        manufacturer:Some("PortBridge".into()),
+        product:Some("Mock USB Device".into()),
+        serial:Some("PB-MOCK-0001".into()),
+        instance_id:Some("MOCK\\PORTBRIDGE".into()),
+        mode:Some(UsbDeviceMode::Mock),
+        interfaces:vec![UsbInterfaceDescriptor{number:0,class:0xff,subclass:0x42,protocol:0x01}],
+    }
 }
 
 #[cfg(windows)]
@@ -41,7 +51,9 @@ fn list_usb_windows() -> Result<Vec<DeviceDescriptor>> {
             manufacturer:v.get("Manufacturer").and_then(|x|x.as_str()).map(str::to_string),
             product:v.get("FriendlyName").and_then(|x|x.as_str()).map(str::to_string),
             serial:None,
-            instance_id:Some(instance)
+            instance_id:Some(instance),
+            mode:Some(UsbDeviceMode::Unknown),
+            interfaces:vec![]
         }
     }).collect())
 }
@@ -110,28 +122,62 @@ fn probe_adb() -> Result<()> {
     Ok(())
 }
 
-fn classify_usb_mode(vid: u16, product: Option<&str>, interfaces: &[(u8,u8,u8,u8)]) -> &'static str {
+fn classify_usb_mode_enum(vid: u16, product: Option<&str>, interfaces: &[(u8,u8,u8,u8)]) -> UsbDeviceMode {
     let p = product.unwrap_or("").to_ascii_lowercase();
 
     if interfaces.iter().any(|(_, class, subclass, protocol)| *class == 0xff && *subclass == 0x42 && *protocol == 0x03)
         || p.contains("fastboot") {
-        return "FASTBOOT";
+        return UsbDeviceMode::Fastboot;
     }
 
     let adb_like = interfaces.iter().any(|(_, class, subclass, protocol)| *class == 0xff && *subclass == 0x42 && *protocol == 0x01);
     if vid == 0x2717 && adb_like {
-        return "XIAOMI_ADB_OR_MI_ASSISTANT_CANDIDATE";
+        return UsbDeviceMode::XiaomiCandidate;
     }
     if adb_like || p.contains("adb") {
-        return "ADB_LIKE";
-    }
-    if vid == 0x2717 && (p.contains("recovery") || p.contains("assistant")) {
-        return "XIAOMI_RECOVERY_OR_MI_ASSISTANT_CANDIDATE";
+        return UsbDeviceMode::AdbLike;
     }
     if vid == 0x2717 {
-        return "XIAOMI_USB";
+        return UsbDeviceMode::XiaomiCandidate;
     }
-    "OTHER_USB"
+    UsbDeviceMode::Other
+}
+
+fn mode_name(mode: &UsbDeviceMode) -> &'static str {
+    match mode {
+        UsbDeviceMode::Unknown => "UNKNOWN",
+        UsbDeviceMode::AdbLike => "ADB_LIKE",
+        UsbDeviceMode::Fastboot => "FASTBOOT",
+        UsbDeviceMode::XiaomiCandidate => "XIAOMI_ADB_OR_MI_ASSISTANT_CANDIDATE",
+        UsbDeviceMode::Other => "OTHER_USB",
+        UsbDeviceMode::Mock => "MOCK",
+    }
+}
+
+fn list_usb_low_level() -> Result<Vec<DeviceDescriptor>> {
+    let devices = nusb::list_devices().wait().context("nusb list_devices")?;
+    Ok(devices.map(|dev| {
+        let raw_interfaces: Vec<(u8,u8,u8,u8)> = dev.interfaces()
+            .map(|i| (i.interface_number(), i.class(), i.subclass(), i.protocol()))
+            .collect();
+        let interfaces = raw_interfaces.iter()
+            .map(|(number,class,subclass,protocol)| UsbInterfaceDescriptor{
+                number:*number, class:*class, subclass:*subclass, protocol:*protocol
+            })
+            .collect();
+        let mode = classify_usb_mode_enum(dev.vendor_id(), dev.product_string(), &raw_interfaces);
+        DeviceDescriptor {
+            id: format!("nusb:{:?}", dev.id()),
+            vid:Some(dev.vendor_id()),
+            pid:Some(dev.product_id()),
+            manufacturer:dev.manufacturer_string().map(str::to_string),
+            product:dev.product_string().map(str::to_string),
+            serial:dev.serial_number().map(str::to_string),
+            instance_id:None,
+            mode:Some(mode),
+            interfaces,
+        }
+    }).collect())
 }
 
 fn probe_raw_usb() -> Result<()> {
@@ -145,12 +191,12 @@ fn probe_raw_usb() -> Result<()> {
             .map(|i| (i.interface_number(), i.class(), i.subclass(), i.protocol()))
             .collect();
 
-        let mode = classify_usb_mode(dev.vendor_id(), dev.product_string(), &interfaces);
+        let mode = classify_usb_mode_enum(dev.vendor_id(), dev.product_string(), &interfaces);
         println!(
             "[RAW-USB] {:04x}:{:04x} | mode={} | product={} | serial={}",
             dev.vendor_id(),
             dev.product_id(),
-            mode,
+            mode_name(&mode),
             dev.product_string().unwrap_or(""),
             dev.serial_number().unwrap_or("")
         );
@@ -195,7 +241,7 @@ async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
         match msg {
             ControlMessage::Ping => write_frame(&mut s,&ControlMessage::Pong).await?,
             ControlMessage::ListDevices => {
-                let mut d = list_usb_windows().unwrap_or_default();
+                let mut d = list_usb_low_level().or_else(|_| list_usb_windows()).unwrap_or_default();
                 if mock { d.push(mock_device()); }
                 write_frame(&mut s,&ControlMessage::DeviceList{devices:d}).await?;
             }
