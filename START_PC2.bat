@@ -66,8 +66,19 @@ portbridge-client.exe --remote-control-smoke %SERVER_IP%:47990 > remote_control_
 type remote_control_test_log.txt
 
 echo.
-echo Log saved to:
+echo ==========================================
+echo   SAFE BULK ENDPOINT PROBE
+echo ==========================================
+echo This probe does NOT send USB payloads.
+echo.
+
+portbridge-client.exe --safe-bulk-probe %SERVER_IP%:47990 > bulk_probe_log.txt 2>&1
+type bulk_probe_log.txt
+
+echo.
+echo Logs saved to:
 echo %cd%\remote_control_test_log.txt
+echo %cd%\bulk_probe_log.txt
 echo.
 del /q portbridge_candidates.txt 2>nul
 del /q portbridge_probe_tmp.txt 2>nul
