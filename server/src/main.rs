@@ -573,7 +573,7 @@ async fn main() -> Result<()> {
     let mock=args.iter().any(|a|a=="--mock-usb");
     let addr=args.iter().find(|a|a.contains(':') && !a.starts_with("--")).cloned().unwrap_or_else(||"0.0.0.0:47990".into());
     let listener=TcpListener::bind(&addr).await?;
-    println!("PortBridge server v0.13 listening on {addr} mock_usb={mock}");
+    println!("PortBridge server v0.18 listening on {addr} mock_usb={mock}");
     let sem=Arc::new(Semaphore::new(128));
     loop {
         let (s,p)=listener.accept().await?;
