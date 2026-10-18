@@ -31,7 +31,17 @@ jobs:
           Copy-Item watch_usb_modes_on_pc1.bat dist\
           Copy-Item run_mock_server.bat dist\
           Copy-Item run_mock_selftest.bat dist\
+          Copy-Item START_PC1.bat dist\
+          Copy-Item START_PC2.bat dist\
+          Copy-Item README_FIRST.txt dist\
+      - shell: powershell
+        run: |
+          Write-Host "=== DIST CONTENTS ==="
+          Get-ChildItem dist
+          if (!(Test-Path dist\START_PC1.bat)) { throw "START_PC1.bat missing from dist" }
+          if (!(Test-Path dist\START_PC2.bat)) { throw "START_PC2.bat missing from dist" }
+          if (!(Test-Path dist\README_FIRST.txt)) { throw "README_FIRST.txt missing from dist" }
       - uses: actions/upload-artifact@v4
         with:
-          name: portbridge-windows-x64-v0.16
+          name: portbridge-windows-x64-v0.17
           path: dist/*
