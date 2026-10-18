@@ -33,5 +33,5 @@ jobs:
           Copy-Item run_mock_selftest.bat dist\
       - uses: actions/upload-artifact@v4
         with:
-          name: portbridge-windows-x64-v0.15
+          name: portbridge-windows-x64-v0.16
           path: dist/*
