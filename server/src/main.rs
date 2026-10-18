@@ -356,6 +356,59 @@ fn open_and_claim_by_id(device_id: &str) -> Result<nusb::Interface> {
 }
 
 
+
+fn probe_bulk_endpoints(interface: &nusb::Interface) -> Vec<UsbEndpointProbe> {
+    let mut out = Vec::new();
+    for ep in 1u8..=15 {
+        let in_addr = 0x80 | ep;
+        match interface.endpoint::<Bulk, In>(in_addr) {
+            Ok(_) => out.push(UsbEndpointProbe{
+                address: in_addr,
+                direction: UsbDirection::In,
+                max_packet_size: 0,
+                open_ok: true,
+                error: None,
+            }),
+            Err(e) => {
+                let msg=e.to_string();
+                if !msg.to_ascii_lowercase().contains("not found") && !msg.to_ascii_lowercase().contains("invalid") {
+                    out.push(UsbEndpointProbe{
+                        address: in_addr,
+                        direction: UsbDirection::In,
+                        max_packet_size: 0,
+                        open_ok: false,
+                        error: Some(msg),
+                    });
+                }
+            }
+        }
+
+        let out_addr = ep;
+        match interface.endpoint::<Bulk, Out>(out_addr) {
+            Ok(_) => out.push(UsbEndpointProbe{
+                address: out_addr,
+                direction: UsbDirection::Out,
+                max_packet_size: 0,
+                open_ok: true,
+                error: None,
+            }),
+            Err(e) => {
+                let msg=e.to_string();
+                if !msg.to_ascii_lowercase().contains("not found") && !msg.to_ascii_lowercase().contains("invalid") {
+                    out.push(UsbEndpointProbe{
+                        address: out_addr,
+                        direction: UsbDirection::Out,
+                        max_packet_size: 0,
+                        open_ok: false,
+                        error: Some(msg),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 fn parse_control_setup(setup: [u8;8]) -> Result<(ControlType, Recipient, u8, u16, u16, u16, bool)> {
     let bm = setup[0];
     let control_type = match (bm >> 5) & 0x03 {
@@ -515,6 +568,22 @@ async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
                 let c=UsbCompletion{request_id:request.request_id,status:UsbStatus::Ok,transferred:data.len() as u32,data};
                 write_frame(&mut s,&ControlMessage::UsbCompletion{completion:c}).await?;
             }
+            ControlMessage::ProbeBulkEndpoints => {
+                if mock {
+                    let endpoints=vec![
+                        UsbEndpointProbe{address:0x81,direction:UsbDirection::In,max_packet_size:64,open_ok:true,error:None},
+                        UsbEndpointProbe{address:0x01,direction:UsbDirection::Out,max_packet_size:64,open_ok:true,error:None},
+                    ];
+                    write_frame(&mut s,&ControlMessage::BulkEndpointProbeResult{endpoints}).await?;
+                } else {
+                    let Some(interface) = real_interface.as_ref() else {
+                        write_frame(&mut s,&ControlMessage::Error{message:"no real USB interface opened".into()}).await?;
+                        continue;
+                    };
+                    let endpoints=probe_bulk_endpoints(interface);
+                    write_frame(&mut s,&ControlMessage::BulkEndpointProbeResult{endpoints}).await?;
+                }
+            }
             ControlMessage::ResetUsb{..} => {
                 if mock {
                     write_frame(&mut s,&ControlMessage::Pong).await?
@@ -573,7 +642,7 @@ async fn main() -> Result<()> {
     let mock=args.iter().any(|a|a=="--mock-usb");
     let addr=args.iter().find(|a|a.contains(':') && !a.starts_with("--")).cloned().unwrap_or_else(||"0.0.0.0:47990".into());
     let listener=TcpListener::bind(&addr).await?;
-    println!("PortBridge server v0.18 listening on {addr} mock_usb={mock}");
+    println!("PortBridge server v0.19 listening on {addr} mock_usb={mock}");
     let sem=Arc::new(Semaphore::new(128));
     loop {
         let (s,p)=listener.accept().await?;
