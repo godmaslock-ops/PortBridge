@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 11;
+pub const PROTOCOL_VERSION: u16 = 12;
 pub const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +22,15 @@ pub struct UsbInterfaceDescriptor {
     pub class: u8,
     pub subclass: u8,
     pub protocol: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsbEndpointProbe {
+    pub address: u8,
+    pub direction: UsbDirection,
+    pub max_packet_size: u32,
+    pub open_ok: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +61,8 @@ pub enum ControlMessage {
     UsbOpened { device_id: String },
     UsbRequest { request: UsbRequest },
     UsbCompletion { completion: UsbCompletion },
+    ProbeBulkEndpoints,
+    BulkEndpointProbeResult { endpoints: Vec<UsbEndpointProbe> },
     ResetUsb { device_id: String },
     CancelUsb { request_id: u64 },
     Close,
