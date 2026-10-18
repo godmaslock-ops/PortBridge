@@ -123,12 +123,40 @@ async fn remote_control_smoke(addr:&str)->Result<()> {
     Ok(())
 }
 
+
+
+async fn probe_server(addr:&str)->Result<()> {
+    let mut s=tokio::time::timeout(
+        std::time::Duration::from_millis(800),
+        TcpStream::connect(addr)
+    ).await.map_err(|_| anyhow!("connect timeout"))??;
+    s.set_nodelay(true)?;
+    write_frame(&mut s,&ControlMessage::Hello{version:PROTOCOL_VERSION,client:"portbridge-probe".into()}).await?;
+    match tokio::time::timeout(std::time::Duration::from_millis(800), recv(&mut s)).await {
+        Ok(Ok(ControlMessage::Welcome{version,..})) if version == PROTOCOL_VERSION => {},
+        Ok(Ok(x)) => return Err(anyhow!("unexpected probe response: {x:?}")),
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err(anyhow!("probe response timeout")),
+    }
+    write_frame(&mut s,&ControlMessage::Ping).await?;
+    match tokio::time::timeout(std::time::Duration::from_millis(800), recv(&mut s)).await {
+        Ok(Ok(ControlMessage::Pong)) => {
+            println!("PORTBRIDGE_OK {addr}");
+            Ok(())
+        }
+        Ok(Ok(x)) => Err(anyhow!("unexpected ping response: {x:?}")),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(anyhow!("ping timeout")),
+    }
+}
+
 #[tokio::main]
 async fn main()->Result<()> {
     let args:Vec<String>=env::args().collect();
     if let Some(i)=args.iter().position(|a|a=="--usb-selftest") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return selftest(addr).await; }
     if let Some(i)=args.iter().position(|a|a=="--list-remote-usb") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return list_remote_usb(addr).await; }
     if let Some(i)=args.iter().position(|a|a=="--remote-control-smoke") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return remote_control_smoke(addr).await; }
-    eprintln!("Usage: portbridge-client --usb-selftest SERVER_IP:47990 | --list-remote-usb SERVER_IP:47990 | --remote-control-smoke SERVER_IP:47990");
+    if let Some(i)=args.iter().position(|a|a=="--probe-server") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return probe_server(addr).await; }
+    eprintln!("Usage: portbridge-client --usb-selftest SERVER_IP:47990 | --list-remote-usb SERVER_IP:47990 | --remote-control-smoke SERVER_IP:47990 | --probe-server SERVER_IP:47990");
     Ok(())
 }
