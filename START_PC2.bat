@@ -76,9 +76,21 @@ portbridge-client.exe --safe-bulk-probe %SERVER_IP%:47990 > bulk_probe_log.txt 2
 type bulk_probe_log.txt
 
 echo.
+echo ==========================================
+echo   SAFE BULK IN TRANSPORT TEST
+echo ==========================================
+echo Reads up to 64 bytes from endpoint 0x81 with a 500 ms timeout.
+echo It does NOT send any data to the phone.
+echo.
+
+portbridge-client.exe --safe-bulk-in %SERVER_IP%:47990 > bulk_in_test_log.txt 2>&1
+type bulk_in_test_log.txt
+
+echo.
 echo Logs saved to:
 echo %cd%\remote_control_test_log.txt
 echo %cd%\bulk_probe_log.txt
+echo %cd%\bulk_in_test_log.txt
 echo.
 del /q portbridge_candidates.txt 2>nul
 del /q portbridge_probe_tmp.txt 2>nul
