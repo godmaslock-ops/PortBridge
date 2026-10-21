@@ -1,0 +1,43 @@
+name: Publish PortBridge Windows Release
+on:
+  push:
+    paths:
+      - '.github/workflows/publish-release.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build real Windows binaries
+        run: cargo build --release --workspace
+      - name: Prepare ZIP and SHA256SUMS
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item target/release/portbridge-server.exe dist/
+          Copy-Item target/release/portbridge-client.exe dist/
+          Copy-Item START_PC1.bat dist/
+          Copy-Item START_PC2.bat dist/
+          Copy-Item README_FIRST.txt dist/
+          foreach ($name in @('portbridge-server.exe','portbridge-client.exe','START_PC1.bat','START_PC2.bat')) {
+            if (!(Test-Path (Join-Path dist $name))) { throw "Missing $name" }
+          }
+          $zip='portbridge-windows-x64-v0.20.0.zip'
+          Compress-Archive -Path dist/* -DestinationPath $zip -Force
+          $hash=(Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
+          Set-Content -Path SHA256SUMS.txt -Value "$hash  $zip" -Encoding ascii
+          Write-Host "Built $zip with SHA256 $hash"
+      - name: Publish persistent release with Windows binaries
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag='v0.20.0'
+          if (gh release view $tag --repo "$env:GITHUB_REPOSITORY" 2>$null) {
+            throw "Release $tag already exists: refusing to overwrite existing assets"
+          }
+          gh release create $tag 'portbridge-windows-x64-v0.20.0.zip' 'SHA256SUMS.txt' --target "$env:GITHUB_SHA" --repo "$env:GITHUB_REPOSITORY" --title 'PortBridge v0.20.0' --notes 'Windows x64 test build for two-PC PortBridge. USB redirection is incomplete; private trusted LAN only.'
