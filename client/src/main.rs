@@ -202,6 +202,59 @@ async fn safe_bulk_probe(addr:&str)->Result<()> {
     Ok(())
 }
 
+
+
+async fn safe_bulk_in_read_probe(addr:&str)->Result<()> {
+    let mut s=TcpStream::connect(addr).await?;
+    s.set_nodelay(true)?;
+    write_frame(&mut s,&ControlMessage::Hello{version:PROTOCOL_VERSION,client:"portbridge-safe-bulk-in".into()}).await?;
+    match recv(&mut s).await? {
+        ControlMessage::Welcome{..} => {},
+        x => return Err(anyhow!("bad welcome: {x:?}")),
+    }
+
+    write_frame(&mut s,&ControlMessage::ListDevices).await?;
+    let devices=match recv(&mut s).await? {
+        ControlMessage::DeviceList{devices} => devices,
+        x => return Err(anyhow!("bad device list: {x:?}")),
+    };
+
+    let d=devices.into_iter()
+        .find(|d| matches!(d.mode, Some(UsbDeviceMode::AdbLike) | Some(UsbDeviceMode::XiaomiCandidate) | Some(UsbDeviceMode::Fastboot)))
+        .ok_or_else(|| anyhow!("no Android/Xiaomi/Fastboot USB device found on remote PC"))?;
+
+    println!("[BULK-IN] selected {} {:04x}:{:04x} mode={:?} product={}",
+        d.id,d.vid.unwrap_or(0),d.pid.unwrap_or(0),d.mode,d.product.clone().unwrap_or_default());
+
+    write_frame(&mut s,&ControlMessage::OpenUsb{device_id:d.id.clone()}).await?;
+    match recv(&mut s).await? {
+        ControlMessage::UsbOpened{..} => println!("[BULK-IN] remote open/claim: OK"),
+        ControlMessage::Error{message} => return Err(anyhow!("remote open/claim failed: {message}")),
+        x => return Err(anyhow!("unexpected open response: {x:?}")),
+    }
+
+    write_frame(&mut s,&ControlMessage::ProbeBulkIn{endpoint:0x81,timeout_ms:500,max_len:64}).await?;
+    match recv(&mut s).await? {
+        ControlMessage::BulkInProbeResult{endpoint,status,transferred,data,message} => {
+            println!("[BULK-IN] endpoint=0x{:02x} status={:?} transferred={}",endpoint,status,transferred);
+            println!("[BULK-IN] {}",message);
+            if !data.is_empty() {
+                let preview:String=data.iter().take(32).map(|b|format!("{:02x}",b)).collect::<Vec<_>>().join(" ");
+                println!("[BULK-IN] data preview: {}",preview);
+            }
+            match status {
+                UsbStatus::Ok | UsbStatus::Timeout => println!("[BULK-IN] transport probe PASSED"),
+                _ => return Err(anyhow!("bulk IN transport probe failed")),
+            }
+        }
+        ControlMessage::Error{message} => return Err(anyhow!("server error: {message}")),
+        x => return Err(anyhow!("unexpected bulk IN response: {x:?}")),
+    }
+
+    write_frame(&mut s,&ControlMessage::Close).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main()->Result<()> {
     let args:Vec<String>=env::args().collect();
@@ -210,6 +263,7 @@ async fn main()->Result<()> {
     if let Some(i)=args.iter().position(|a|a=="--remote-control-smoke") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return remote_control_smoke(addr).await; }
     if let Some(i)=args.iter().position(|a|a=="--probe-server") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return probe_server(addr).await; }
     if let Some(i)=args.iter().position(|a|a=="--safe-bulk-probe") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return safe_bulk_probe(addr).await; }
-    eprintln!("Usage: portbridge-client --usb-selftest SERVER_IP:47990 | --list-remote-usb SERVER_IP:47990 | --remote-control-smoke SERVER_IP:47990 | --probe-server SERVER_IP:47990 | --safe-bulk-probe SERVER_IP:47990");
+    if let Some(i)=args.iter().position(|a|a=="--safe-bulk-in") { let addr=args.get(i+1).map(String::as_str).unwrap_or("127.0.0.1:47990"); return safe_bulk_in_read_probe(addr).await; }
+    eprintln!("Usage: portbridge-client --usb-selftest SERVER_IP:47990 | --list-remote-usb SERVER_IP:47990 | --remote-control-smoke SERVER_IP:47990 | --probe-server SERVER_IP:47990 | --safe-bulk-probe SERVER_IP:47990 | --safe-bulk-in SERVER_IP:47990");
     Ok(())
 }
