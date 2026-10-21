@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 13;
 pub const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +63,8 @@ pub enum ControlMessage {
     UsbCompletion { completion: UsbCompletion },
     ProbeBulkEndpoints,
     BulkEndpointProbeResult { endpoints: Vec<UsbEndpointProbe> },
+    ProbeBulkIn { endpoint: u8, timeout_ms: u32, max_len: u32 },
+    BulkInProbeResult { endpoint: u8, status: UsbStatus, transferred: u32, data: Vec<u8>, message: String },
     ResetUsb { device_id: String },
     CancelUsb { request_id: u64 },
     Close,
