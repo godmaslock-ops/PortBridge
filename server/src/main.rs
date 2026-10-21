@@ -409,6 +409,52 @@ fn probe_bulk_endpoints(interface: &nusb::Interface) -> Vec<UsbEndpointProbe> {
     out
 }
 
+
+fn safe_bulk_in_read(interface: &nusb::Interface, endpoint: u8, timeout_ms: u32, max_len: u32) -> BulkInProbeResult {
+    let bounded_timeout = timeout_ms.clamp(50, 2_000);
+    let bounded_len = max_len.clamp(1, 4_096) as usize;
+    let io_timeout = std::time::Duration::from_millis(bounded_timeout as u64);
+
+    let mut reader = match interface.endpoint::<Bulk, In>(endpoint) {
+        Ok(ep) => ep.reader(bounded_len.max(512)).with_read_timeout(io_timeout),
+        Err(e) => return BulkInProbeResult {
+            endpoint,
+            status: UsbStatus::Error,
+            transferred: 0,
+            data: vec![],
+            message: format!("open bulk IN endpoint failed: {e}"),
+        },
+    };
+
+    let mut data = vec![0u8; bounded_len];
+    match reader.read(&mut data) {
+        Ok(n) => {
+            data.truncate(n);
+            BulkInProbeResult {
+                endpoint,
+                status: UsbStatus::Ok,
+                transferred: n as u32,
+                data,
+                message: format!("bulk IN read completed with {n} byte(s)"),
+            }
+        }
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => BulkInProbeResult {
+            endpoint,
+            status: UsbStatus::Timeout,
+            transferred: 0,
+            data: vec![],
+            message: format!("no unsolicited data within {bounded_timeout} ms; endpoint stayed accessible"),
+        },
+        Err(e) => BulkInProbeResult {
+            endpoint,
+            status: UsbStatus::Error,
+            transferred: 0,
+            data: vec![],
+            message: format!("bulk IN read failed: {e}"),
+        },
+    }
+}
+
 fn parse_control_setup(setup: [u8;8]) -> Result<(ControlType, Recipient, u8, u16, u16, u16, bool)> {
     let bm = setup[0];
     let control_type = match (bm >> 5) & 0x03 {
@@ -584,6 +630,31 @@ async fn handle(mut s: TcpStream, mock: bool) -> Result<()> {
                     write_frame(&mut s,&ControlMessage::BulkEndpointProbeResult{endpoints}).await?;
                 }
             }
+            ControlMessage::ProbeBulkIn{endpoint,timeout_ms,max_len} => {
+                if mock {
+                    let data=b"PORTBRIDGE-MOCK-BULK-IN".to_vec();
+                    write_frame(&mut s,&ControlMessage::BulkInProbeResult{
+                        endpoint,
+                        status:UsbStatus::Ok,
+                        transferred:data.len() as u32,
+                        data,
+                        message:"mock bulk IN data".into()
+                    }).await?;
+                } else {
+                    let Some(interface)=real_interface.as_ref() else {
+                        write_frame(&mut s,&ControlMessage::Error{message:"no real USB interface opened".into()}).await?;
+                        continue;
+                    };
+                    let result=safe_bulk_in_read(interface,endpoint,timeout_ms,max_len);
+                    write_frame(&mut s,&ControlMessage::BulkInProbeResult{
+                        endpoint:result.endpoint,
+                        status:result.status,
+                        transferred:result.transferred,
+                        data:result.data,
+                        message:result.message
+                    }).await?;
+                }
+            }
             ControlMessage::ResetUsb{..} => {
                 if mock {
                     write_frame(&mut s,&ControlMessage::Pong).await?
@@ -642,7 +713,7 @@ async fn main() -> Result<()> {
     let mock=args.iter().any(|a|a=="--mock-usb");
     let addr=args.iter().find(|a|a.contains(':') && !a.starts_with("--")).cloned().unwrap_or_else(||"0.0.0.0:47990".into());
     let listener=TcpListener::bind(&addr).await?;
-    println!("PortBridge server v0.19 listening on {addr} mock_usb={mock}");
+    println!("PortBridge server v0.20 listening on {addr} mock_usb={mock}");
     let sem=Arc::new(Semaphore::new(128));
     loop {
         let (s,p)=listener.accept().await?;
