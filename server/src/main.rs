@@ -410,6 +410,14 @@ fn probe_bulk_endpoints(interface: &nusb::Interface) -> Vec<UsbEndpointProbe> {
 }
 
 
+struct BulkInProbeResult {
+    endpoint: u8,
+    status: UsbStatus,
+    transferred: u32,
+    data: Vec<u8>,
+    message: String,
+}
+
 fn safe_bulk_in_read(interface: &nusb::Interface, endpoint: u8, timeout_ms: u32, max_len: u32) -> BulkInProbeResult {
     let bounded_timeout = timeout_ms.clamp(50, 2_000);
     let bounded_len = max_len.clamp(1, 4_096) as usize;
